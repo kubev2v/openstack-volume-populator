@@ -9,6 +9,4 @@ COPY main.go ./
 RUN go mod download
 RUN go build -o /main
 
-RUN apk add git
-
 ENTRYPOINT ["/main"]

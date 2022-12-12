@@ -17,9 +17,10 @@ limitations under the License.
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"strings"
 
@@ -164,8 +165,7 @@ func populate(fileName, endpoint, username, password, region, domainName, tenant
 		klog.Fatal(err)
 	}
 
-	// TODO do bufferred reading
-	content, err := ioutil.ReadAll(result)
+	reader := bufio.NewReader(result)
 	if err != nil {
 		klog.Fatal(err)
 	}
@@ -176,7 +176,7 @@ func populate(fileName, endpoint, username, password, region, domainName, tenant
 		}
 		defer f.Close()
 
-		_, err = f.Write(content)
+		err = writeData(*reader, f)
 		if err != nil {
 			klog.Fatal(err)
 		}
@@ -187,7 +187,30 @@ func populate(fileName, endpoint, username, password, region, domainName, tenant
 		}
 		defer f.Close()
 
-		_, err = f.Write(content)
+		err = writeData(*reader, f)
 		klog.Fatal(err)
 	}
+}
+
+func writeData(reader bufio.Reader, file *os.File) error {
+	part := make([]byte, 4096)
+	var count int
+	var err error
+	total := 0
+
+	for {
+		if count, err = reader.Read(part); err != nil {
+			break
+		}
+		file.Write(part[:count])
+		total += count
+		klog.Info("Transferred: ", total)
+	}
+	if err != io.EOF {
+		klog.Fatal("Error Reading ", file.Name(), ": ", err)
+	} else {
+		err = nil
+	}
+
+	return nil
 }
