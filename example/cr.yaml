@@ -1,0 +1,11 @@
+apiVersion: forklift.konveyor.io/v1beta1
+kind: OpenstackVolumePopulator
+metadata:
+  name: ceph-vol-pop-os
+  namespace: default
+spec:
+  identityUrl: http://10.46.11.131:5000/v3
+  secretName: os-secret
+  imageId: f8211b52-af75-4b8e-9863-cc334f3faf30
+status:
+  transferred: "0"

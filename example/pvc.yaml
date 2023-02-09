@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ceph-vol-pop-os
+  namespace: default
+spec:
+  storageClassName: nfs-csi
+  volumeMode: Filesystem
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 7Gi
+  dataSourceRef:
+    apiGroup: forklift.konveyor.io
+    kind: OpenstackVolumePopulator
+    name: ceph-vol-pop-os
+
