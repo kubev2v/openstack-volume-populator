@@ -11,17 +11,18 @@ type OpenstackVolumePopulator struct {
 	meta.TypeMeta   `json:",inline"`
 	meta.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec OpenstackVolumePopulatorSpec `json:"spec"`
+	Spec   OpenstackVolumePopulatorSpec   `json:"spec"`
+	Status OpenstackVolumePopulatorStatus `json:"status"`
 }
 
 type OpenstackVolumePopulatorSpec struct {
 	IdentityURL string `json:"identityUrl"`
-	Username    string `json:"username"`
-	Password    string `json:"password"`
+	SecretName  string `json:"secretName"`
 	ImageID     string `json:"imageId"`
-	Region      string `json:"region"`
-	Domain      string `json:"domain"`
-	Tenant      string `json:"tenant"`
+}
+
+type OpenstackVolumePopulatorStatus struct {
+	Transferred string `json:"transferred"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

@@ -17,23 +17,27 @@ limitations under the License.
 package main
 
 import (
-	"bufio"
+	"context"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"forklift.konveyor.io/os-populator/pkg/v1beta1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/klog/v2"
-
 	"github.com/gophercloud/gophercloud"
 	"github.com/gophercloud/gophercloud/openstack"
 	"github.com/gophercloud/gophercloud/openstack/imageservice/v2/imagedata"
 	populator_machinery "github.com/kubernetes-csi/lib-volume-populator/populator-machinery"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -42,18 +46,23 @@ const (
 	devicePath = "/dev/block"
 )
 
+const (
+	groupName  = "forklift.konveyor.io"
+	apiVersion = "v1beta1"
+	kind       = "OpenstackVolumePopulator"
+	resource   = "openstackvolumepopulators"
+)
+
 var version = "unknown"
 
 func main() {
 	var (
 		mode             string
 		identityEndpoint string
-		username         string
-		password         string
-		region           string
-		domainName       string
-		tenantName       string
 		imageID          string
+		crNamespace      string
+		crName           string
+		secretName       string
 
 		fileName     string
 		httpEndpoint string
@@ -68,14 +77,12 @@ func main() {
 	// Main arg
 	flag.StringVar(&mode, "mode", "", "Mode to run in (controller, populate)")
 	flag.StringVar(&identityEndpoint, "endpoint", "", "endpoint URL (https://openstack.example.com:5000/v2.0)")
-	flag.StringVar(&username, "username", "", "Openstack username")
-	flag.StringVar(&password, "password", "", "Openstack password")
-	flag.StringVar(&region, "region", "", "Openstack region")
-	flag.StringVar(&domainName, "domain", "", "Openstack domain")
-	flag.StringVar(&tenantName, "tenant", "", "Openstack tenant")
+	flag.StringVar(&secretName, "secret-name", "", "secret containing OpenStack credentials")
 
 	flag.StringVar(&imageID, "image-id", "", "Openstack image ID")
 	flag.StringVar(&fileName, "file-name", "", "Filename to populate")
+	flag.StringVar(&crName, "cr-name", "", "Custom Resource instance name")
+	flag.StringVar(&crNamespace, "cr-namespace", "", "Custom Resource instance namespace")
 
 	// Populate args
 
@@ -98,12 +105,6 @@ func main() {
 
 	switch mode {
 	case "controller":
-		const (
-			groupName  = "forklift.konveyor.io"
-			apiVersion = "v1beta1"
-			kind       = "OpenstackVolumePopulator"
-			resource   = "openstackvolumepopulators"
-		)
 		var (
 			gk  = schema.GroupKind{Group: groupName, Kind: kind}
 			gvr = schema.GroupVersionResource{Group: groupName, Version: apiVersion, Resource: resource}
@@ -111,7 +112,7 @@ func main() {
 		populator_machinery.RunController(masterURL, kubeconfig, imageName, httpEndpoint, metricsPath,
 			namespace, prefix, gk, gvr, mountPath, devicePath, getPopulatorPodArgs)
 	case "populate":
-		populate(fileName, identityEndpoint, username, password, region, domainName, tenantName, imageID)
+		populate(crName, crNamespace, namespace, fileName, identityEndpoint, secretName, imageID)
 	default:
 		klog.Fatalf("Invalid mode: %s", mode)
 	}
@@ -131,41 +132,77 @@ func getPopulatorPodArgs(rawBlock bool, u *unstructured.Unstructured) ([]string,
 	}
 
 	args = append(args, "--endpoint="+openstackPopulator.Spec.IdentityURL)
+	args = append(args, "--secret-name="+openstackPopulator.Spec.SecretName)
 	args = append(args, "--image-id="+openstackPopulator.Spec.ImageID)
-	args = append(args, "--username="+openstackPopulator.Spec.Username)
-	args = append(args, "--password="+openstackPopulator.Spec.Password)
-	args = append(args, "--region="+openstackPopulator.Spec.Region)
-	args = append(args, "--domain="+openstackPopulator.Spec.Domain)
-	args = append(args, "--tenant="+openstackPopulator.Spec.Tenant)
+	args = append(args, "--cr-name="+openstackPopulator.Name)
+	args = append(args, "--cr-namespace="+openstackPopulator.Namespace)
 
 	return args, nil
 }
 
-func populate(fileName, endpoint, username, password, region, domainName, tenantName, imageID string) {
-	opts := gophercloud.AuthOptions{
+type openstackConfig struct {
+	username    string
+	password    string
+	domainName  string
+	projectName string
+	insecure    string
+	region      string
+}
+
+func loadConfig(secretName, endpoint, namespace string) openstackConfig {
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		klog.Fatal(err.Error())
+	}
+	// creates the clientset
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		klog.Fatal(err.Error())
+	}
+
+	klog.Info("Looking for secret", "secret", secretName, "namespace", namespace)
+	secret, err := clientset.CoreV1().Secrets(namespace).Get(context.TODO(), secretName, metav1.GetOptions{})
+	if err != nil {
+		klog.Fatal(err.Error())
+	}
+
+	return openstackConfig{
+		username:    string(secret.Data["username"]),
+		password:    string(secret.Data["password"]),
+		insecure:    string(secret.Data["insecure"]),
+		projectName: string(secret.Data["projectName"]),
+		region:      string(secret.Data["region"]),
+		domainName:  string(secret.Data["domainName"]),
+	}
+}
+
+func populate(crName, crNamespace, namespace, fileName, endpoint, secretName, imageID string) {
+	config := loadConfig(secretName, endpoint, namespace)
+
+	authOpts := gophercloud.AuthOptions{
 		IdentityEndpoint: endpoint,
-		Username:         username,
-		Password:         password,
-		DomainName:       domainName,
-		TenantName:       tenantName,
+		DomainName:       config.domainName,
+		Username:         config.username,
+		Password:         config.password,
+		TenantName:       config.projectName,
 	}
 
-	provider, err := openstack.AuthenticatedClient(opts)
+	provider, err := openstack.AuthenticatedClient(authOpts)
 	if err != nil {
 		klog.Fatal(err)
 	}
 
-	imageService, err := openstack.NewImageServiceV2(provider, gophercloud.EndpointOpts{Region: region})
+	imageService, err := openstack.NewImageServiceV2(provider, gophercloud.EndpointOpts{Region: config.region})
 	if err != nil {
 		klog.Fatal(err)
 	}
 
-	result, err := imagedata.Download(imageService, imageID).Extract()
+	image, err := imagedata.Download(imageService, imageID).Extract()
 	if err != nil {
 		klog.Fatal(err)
 	}
+	defer image.Close()
 
-	reader := bufio.NewReader(result)
 	if err != nil {
 		klog.Fatal(err)
 	}
@@ -176,40 +213,78 @@ func populate(fileName, endpoint, username, password, region, domainName, tenant
 		}
 		defer f.Close()
 
-		err = writeData(*reader, f)
+		err = writeData(image, f, crName, crNamespace)
 		if err != nil {
 			klog.Fatal(err)
 		}
 	} else {
-		f, err := os.Open(fileName)
+		f, err := os.OpenFile(fileName, os.O_RDWR, 0777)
 		if err != nil {
 			klog.Fatal(err)
 		}
 		defer f.Close()
 
-		err = writeData(*reader, f)
-		klog.Fatal(err)
+		err = writeData(image, f, crName, crNamespace)
+		if err != nil {
+			klog.Fatal(err)
+		}
 	}
 }
 
-func writeData(reader bufio.Reader, file *os.File) error {
-	part := make([]byte, 4096)
-	var count int
-	var err error
-	total := 0
+type CountingReader struct {
+	reader io.ReadCloser
+	total  int64
+}
 
-	for {
-		if count, err = reader.Read(part); err != nil {
-			break
-		}
-		file.Write(part[:count])
-		total += count
-		klog.Info("Transferred: ", total)
+func (cr *CountingReader) Read(p []byte) (int, error) {
+	n, err := cr.reader.Read(p)
+	cr.total += int64(n)
+	klog.Info("Transferred: ", cr.total)
+	return n, err
+}
+
+func writeData(reader io.ReadCloser, file *os.File, crName, crNamespace string) error {
+	var err error
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		klog.Fatal(err.Error())
 	}
-	if err != io.EOF {
-		klog.Fatal("Error Reading ", file.Name(), ": ", err)
-	} else {
-		err = nil
+
+	client, err := dynamic.NewForConfig(config)
+	if err != nil {
+		klog.Fatal(err.Error())
+	}
+	gvr := schema.GroupVersionResource{Group: groupName, Version: apiVersion, Resource: resource}
+
+	var total int64
+	countingReader := CountingReader{reader, total}
+
+	done := make(chan bool)
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				populatorCr, err := client.Resource(gvr).Namespace(crNamespace).Get(context.TODO(), crName, metav1.GetOptions{})
+				if err != nil {
+					klog.Fatal(err.Error())
+				}
+				status := map[string]interface{}{"transferred": fmt.Sprintf("%d", total)}
+				unstructured.SetNestedField(populatorCr.Object, status, "status")
+
+				_, err = client.Resource(gvr).Namespace(crNamespace).Update(context.TODO(), populatorCr, metav1.UpdateOptions{})
+				if err != nil {
+					klog.Fatal(err.Error())
+				}
+			}
+
+			time.Sleep(5 * time.Second)
+		}
+	}()
+
+	if _, err := io.Copy(file, &countingReader); err != nil {
+		klog.Fatal(err)
 	}
 
 	return nil

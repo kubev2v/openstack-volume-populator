@@ -33,31 +33,27 @@ spec:
             type: object
           spec:
             properties:
-              domain:
-                type: string
               identityUrl:
                 type: string
               imageId:
                 type: string
-              password:
-                type: string
-              region:
-                type: string
-              tenant:
-                type: string
-              username:
+              secretName:
                 type: string
             required:
-            - domain
             - identityUrl
             - imageId
-            - password
-            - region
-            - tenant
-            - username
+            - secretName
+            type: object
+          status:
+            properties:
+              transferred:
+                type: string
+            required:
+            - transferred
             type: object
         required:
         - spec
+        - status
         type: object
     served: true
     storage: true
