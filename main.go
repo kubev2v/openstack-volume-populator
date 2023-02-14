@@ -233,13 +233,13 @@ func populate(crName, crNamespace, namespace, fileName, endpoint, secretName, im
 
 type CountingReader struct {
 	reader io.ReadCloser
-	total  int64
+	total  *int64
 }
 
 func (cr *CountingReader) Read(p []byte) (int, error) {
 	n, err := cr.reader.Read(p)
-	cr.total += int64(n)
-	klog.Info("Transferred: ", cr.total)
+	*cr.total += int64(n)
+	klog.Info("Transferred: ", *cr.total)
 	return n, err
 }
 
@@ -256,7 +256,7 @@ func writeData(reader io.ReadCloser, file *os.File, crName, crNamespace string) 
 	}
 	gvr := schema.GroupVersionResource{Group: groupName, Version: apiVersion, Resource: resource}
 
-	var total int64
+	total := new(int64)
 	countingReader := CountingReader{reader, total}
 
 	done := make(chan bool)
@@ -270,7 +270,7 @@ func writeData(reader io.ReadCloser, file *os.File, crName, crNamespace string) 
 				if err != nil {
 					klog.Fatal(err.Error())
 				}
-				status := map[string]interface{}{"transferred": fmt.Sprintf("%d", total)}
+				status := map[string]interface{}{"transferred": fmt.Sprintf("%d", *total)}
 				unstructured.SetNestedField(populatorCr.Object, status, "status")
 
 				_, err = client.Resource(gvr).Namespace(crNamespace).Update(context.TODO(), populatorCr, metav1.UpdateOptions{})
@@ -279,12 +279,24 @@ func writeData(reader io.ReadCloser, file *os.File, crName, crNamespace string) 
 				}
 			}
 
-			time.Sleep(5 * time.Second)
+			time.Sleep(3 * time.Second)
 		}
 	}()
 
 	if _, err := io.Copy(file, &countingReader); err != nil {
 		klog.Fatal(err)
+	}
+	done <- true
+	populatorCr, err := client.Resource(gvr).Namespace(crNamespace).Get(context.TODO(), crName, metav1.GetOptions{})
+	if err != nil {
+		klog.Fatal(err.Error())
+	}
+	status := map[string]interface{}{"transferred": *countingReader.total}
+	unstructured.SetNestedField(populatorCr.Object, status, "status")
+
+	_, err = client.Resource(gvr).Namespace(crNamespace).Update(context.TODO(), populatorCr, metav1.UpdateOptions{})
+	if err != nil {
+		klog.Error(err)
 	}
 
 	return nil
